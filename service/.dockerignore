@@ -1,0 +1,10 @@
+.env.yaml
+.env-*.yaml
+.gitignore
+.gcloudignore
+deploy.sh
+deploy-*.sh
+update_config.sh
+pylintrc
+**/*_test.py
+**/*-test.py

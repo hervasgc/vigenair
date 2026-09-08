@@ -32,7 +32,6 @@ gcloud services enable \
   aiplatform.googleapis.com \
   artifactregistry.googleapis.com \
   cloudbuild.googleapis.com \
-  cloudfunctions.googleapis.com \
   compute.googleapis.com \
   eventarc.googleapis.com \
   logging.googleapis.com \
@@ -56,7 +55,6 @@ done
 COMPUTE_SA_ROLES=(
     "roles/eventarc.eventReceiver"
     "roles/run.invoker"
-    "roles/cloudfunctions.invoker"
     "roles/storage.objectAdmin"
     "roles/aiplatform.user"
     "roles/logging.logWriter"
@@ -82,18 +80,35 @@ gcloud --no-user-output-enabled projects add-iam-policy-binding \
     --member="serviceAccount:${VERTEXAI_SERVICE_ACCOUNT}" \
     --role="roles/storage.objectViewer"
 printf "Operation finished successfully!\n"
-printf "\nINFO - Deploying the 'vigenair' Cloud Function...\n"
-gcloud functions deploy vigenair \
---env-vars-file .env.yaml \
---gen2 \
+
+printf "\nINFO - Removing legacy 'vigenair' Cloud Function (and its trigger), if present...\n"
+gcloud functions delete vigenair --region=<gcp-region> --quiet 2>/dev/null || true
+
+printf "\nINFO - Deploying the 'vigenair' Cloud Run service...\n"
+gcloud run deploy vigenair \
 --region=<gcp-region> \
---runtime=python310 \
 --source=. \
---entry-point=gcs_file_uploaded \
---timeout=540s \
 --memory=32Gi \
 --cpu=8 \
---trigger-event-filters="type=google.cloud.storage.object.v1.finalized" \
---trigger-event-filters="bucket=<gcs-bucket>" \
---trigger-location="<gcs-location>"
+--timeout=540s \
+--concurrency=1 \
+--no-allow-unauthenticated \
+--env-vars-file=.env.yaml
+test $? -eq 0 || exit
+
+printf "\nINFO - Creating Eventarc trigger for GCS uploads...\n"
+gcloud eventarc triggers create vigenair-gcs-trigger \
+--location=<gcs-location> \
+--destination-run-service=vigenair \
+--destination-run-region=<gcp-region> \
+--event-filters="type=google.cloud.storage.object.v1.finalized" \
+--event-filters="bucket=<gcs-bucket>" \
+--service-account="${COMPUTE_SERVICE_ACCOUNT}"
+test $? -eq 0 || exit
+
+printf "\nINFO - Granting Eventarc invoker permission on the Cloud Run service...\n"
+gcloud run services add-iam-policy-binding vigenair \
+--region=<gcp-region> \
+--member="serviceAccount:${COMPUTE_SERVICE_ACCOUNT}" \
+--role="roles/run.invoker"
 test $? -eq 0 || exit

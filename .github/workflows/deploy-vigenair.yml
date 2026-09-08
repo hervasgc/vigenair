@@ -1,0 +1,66 @@
+name: Deploy vigenair service to Cloud Run
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'service/**'
+      - '.github/workflows/deploy-vigenair.yml'
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ secrets.GCP_REGION }}
+      GCS_BUCKET: ${{ secrets.GCS_BUCKET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Fill in service config placeholders
+        working-directory: service
+        run: |
+          sed -i "s#<gcp-project-id>#${GCP_PROJECT_ID}#g; s#<gcp-region>#${GCP_REGION}#g" .env.yaml
+
+      - name: Deploy to Cloud Run
+        working-directory: service
+        run: |
+          gcloud run deploy vigenair \
+            --project="${GCP_PROJECT_ID}" \
+            --region="${GCP_REGION}" \
+            --source=. \
+            --memory=32Gi \
+            --cpu=8 \
+            --timeout=540s \
+            --concurrency=1 \
+            --no-allow-unauthenticated \
+            --env-vars-file=.env.yaml \
+            --quiet
+
+      - name: Ensure Eventarc trigger exists
+        run: |
+          if ! gcloud eventarc triggers describe vigenair-gcs-trigger \
+              --location="${GCP_REGION}" --project="${GCP_PROJECT_ID}" >/dev/null 2>&1; then
+            COMPUTE_SA="$(gcloud projects describe "${GCP_PROJECT_ID}" --format='value(projectNumber)')-compute@developer.gserviceaccount.com"
+            gcloud eventarc triggers create vigenair-gcs-trigger \
+              --project="${GCP_PROJECT_ID}" \
+              --location="${GCP_REGION}" \
+              --destination-run-service=vigenair \
+              --destination-run-region="${GCP_REGION}" \
+              --event-filters="type=google.cloud.storage.object.v1.finalized" \
+              --event-filters="bucket=${GCS_BUCKET}" \
+              --service-account="${COMPUTE_SA}"
+            gcloud run services add-iam-policy-binding vigenair \
+              --project="${GCP_PROJECT_ID}" \
+              --region="${GCP_REGION}" \
+              --member="serviceAccount:${COMPUTE_SA}" \
+              --role="roles/run.invoker"
+          fi

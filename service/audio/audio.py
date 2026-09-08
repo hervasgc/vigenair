@@ -34,7 +34,6 @@ import storage as StorageService
 import utils as Utils
 import vertexai
 from vertexai.generative_models import GenerativeModel, Part
-import whisper
 
 
 def combine_audio_files(output_path: str, audio_files: Sequence[str]):
@@ -381,18 +380,27 @@ def _transcribe_whisper(
   language_probability = info.language_probability
 
   results = list(segments)
-  results_dict = []
-  for result in results:
-    result_dict = result._asdict()
-    words_dict = [word._asdict() for word in result_dict['words']]
-    result_dict['words'] = words_dict
-    results_dict.append(result_dict)
 
-  writer = whisper.utils.get_writer(
-      ConfigService.OUTPUT_SUBTITLES_TYPE,
-      f'{output_dir}/',
-  )
-  writer({'segments': results_dict}, audio_file_path, {'highlight_words': True})
+  def format_timestamp(seconds: float):
+      milliseconds = round(seconds * 1000.0)
+      hours = milliseconds // 3600000
+      milliseconds -= hours * 3600000
+      minutes = milliseconds // 60000
+      milliseconds -= minutes * 60000
+      secs = milliseconds // 1000
+      milliseconds -= secs * 1000
+      return f"{hours:02}:{minutes:02}:{secs:02}.{milliseconds:03}"
+
+  base_name = os.path.basename(audio_file_path)
+  base_name_without_ext = os.path.splitext(base_name)[0]
+  vtt_file_path = os.path.join(output_dir, f"{base_name_without_ext}.{ConfigService.OUTPUT_SUBTITLES_TYPE}")
+
+  with open(vtt_file_path, "w", encoding="utf-8") as f:
+      f.write("WEBVTT\n\n")
+      for segment in results:
+          start = format_timestamp(segment.start)
+          end = format_timestamp(segment.end)
+          f.write(f"{start} --> {end}\n{segment.text.strip()}\n\n")
   logging.info(
       'TRANSCRIPTION - transcript for %s written successfully!',
       audio_file_path,

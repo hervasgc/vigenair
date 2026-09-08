@@ -19,6 +19,10 @@ locals {
   service_environment_variables = yamldecode(data.local_file.env_config_file.content)
 }
 
+# Used only to compute a content hash so the Cloud Run deploy below re-runs
+# whenever the service source changes; the archive itself is not uploaded
+# anywhere ("gcloud run deploy --source" builds directly from the local
+# "service/" directory via Cloud Build, using "service/Dockerfile").
 data "archive_file" "service_source_code_archive" {
   type        = "zip"
   output_path = "${path.root}/service_source_code.zip"
@@ -33,63 +37,84 @@ data "archive_file" "service_source_code_archive" {
   ]
 }
 
-module "source_code_bucket" {
-  source        = "github.com/terraform-google-modules/terraform-google-cloud-storage.git//modules/simple_bucket?ref=27829d2c0e0b3edac6ef03858d2ba40f06f492f9" # commit hash of version 9.1.0
-  project_id    = module.project_services.project_id
-  name          = "virgenair-service-source-${var.project_id}"
-  location      = var.region
-  force_destroy = true
-
-  iam_members = [{
-    role   = "roles/storage.admin"
-    member = data.google_compute_default_service_account.compute_service_agent.member
-  }]
-}
-
-resource "google_storage_bucket_object" "gcs_service_source_code_archive" {
-  name   = "vigenair_service_source_${data.archive_file.service_source_code_archive.output_sha256}.zip"
-  source = data.archive_file.service_source_code_archive.output_path
-  bucket = module.source_code_bucket.name
-}
-
-
-resource "google_cloudfunctions2_function" "vigenair_service" {
-  name     = "vigenair"
-  project  = module.project_services.project_id
-  location = var.region
-
-  # Build config to prepare the code to run on Cloud Functions 2
-  build_config {
-    runtime = "python310"
-    source {
-      storage_source {
-        bucket = module.source_code_bucket.name
-        object = google_storage_bucket_object.gcs_service_source_code_archive.name
-      }
-
-    }
-    entry_point = "gcs_file_uploaded"
+# "google_cloud_run_v2_service" requires a pre-built container image, and the
+# Google Terraform provider has no equivalent to
+# "google_cloudfunctions2_function.build_config.source" for building straight
+# from a local source directory. "gcloud run deploy --source" is the
+# supported way to build and deploy a container to a real Cloud Run service
+# in one step, so it is invoked here as a local-exec escape hatch, re-run
+# whenever the source hash changes. It builds from "service/Dockerfile"
+# (pinned to Python 3.10, matching the app's dependencies) rather than
+# Buildpacks, which no longer offer a Python 3.10 runtime.
+resource "null_resource" "vigenair_cloud_run_deploy" {
+  triggers = {
+    source_hash = data.archive_file.service_source_code_archive.output_sha256
   }
 
-  event_trigger {
-    trigger_region        = var.gcs_location
-    event_type            = "google.cloud.storage.object.v1.finalized"
-    service_account_email = data.google_compute_default_service_account.compute_service_agent.email
-    retry_policy          = "RETRY_POLICY_RETRY"
-    event_filters {
-      attribute = "bucket"
-      value     = google_storage_bucket.backend_service_bucket.name
-    }
-  }
-
-  service_config {
-    available_memory      = "32Gi"
-    available_cpu         = "8"
-    timeout_seconds       = 540
-    environment_variables = local.service_environment_variables
+  provisioner "local-exec" {
+    working_dir = "${path.root}/../service"
+    command     = <<-EOT
+      gcloud run deploy vigenair \
+        --project=${module.project_services.project_id} \
+        --region=${var.region} \
+        --source=. \
+        --memory=32Gi \
+        --cpu=8 \
+        --timeout=540s \
+        --concurrency=1 \
+        --no-allow-unauthenticated \
+        --env-vars-file=.env.yaml \
+        --quiet
+    EOT
   }
 
   depends_on = [
     time_sleep.wait_for_policy_propagation
   ]
+}
+
+# Read-only reference to the service deployed above. It is intentionally not
+# managed as a "google_cloud_run_v2_service" resource: Terraform would fight
+# the imperative "gcloud run deploy" over the container image/revision on
+# every apply.
+data "google_cloud_run_v2_service" "vigenair_service" {
+  name     = "vigenair"
+  project  = module.project_services.project_id
+  location = var.region
+
+  depends_on = [
+    null_resource.vigenair_cloud_run_deploy
+  ]
+}
+
+resource "google_eventarc_trigger" "vigenair_gcs_trigger" {
+  name     = "vigenair-gcs-trigger"
+  project  = module.project_services.project_id
+  location = var.gcs_location
+
+  matching_criteria {
+    attribute = "type"
+    value     = "google.cloud.storage.object.v1.finalized"
+  }
+  matching_criteria {
+    attribute = "bucket"
+    value     = google_storage_bucket.backend_service_bucket.name
+  }
+
+  service_account = data.google_compute_default_service_account.compute_service_agent.email
+
+  destination {
+    cloud_run_service {
+      service = data.google_cloud_run_v2_service.vigenair_service.name
+      region  = var.region
+    }
+  }
+}
+
+resource "google_cloud_run_v2_service_iam_member" "vigenair_eventarc_invoker" {
+  project  = module.project_services.project_id
+  location = var.region
+  name     = data.google_cloud_run_v2_service.vigenair_service.name
+  role     = "roles/run.invoker"
+  member   = data.google_compute_default_service_account.compute_service_agent.member
 }
