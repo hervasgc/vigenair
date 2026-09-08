@@ -93,7 +93,8 @@ gcloud run deploy vigenair \
 --timeout=540s \
 --concurrency=1 \
 --no-allow-unauthenticated \
---env-vars-file=.env.yaml
+--env-vars-file=.env.yaml \
+--clear-base-image
 test $? -eq 0 || exit
 
 printf "\nINFO - Creating Eventarc trigger for GCS uploads...\n"

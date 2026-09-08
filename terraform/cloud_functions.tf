@@ -64,6 +64,7 @@ resource "null_resource" "vigenair_cloud_run_deploy" {
         --concurrency=1 \
         --no-allow-unauthenticated \
         --env-vars-file=.env.yaml \
+        --clear-base-image \
         --quiet
     EOT
   }

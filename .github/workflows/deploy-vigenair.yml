@@ -43,6 +43,7 @@ jobs:
             --concurrency=1 \
             --no-allow-unauthenticated \
             --env-vars-file=.env.yaml \
+            --clear-base-image \
             --quiet
 
       - name: Ensure Eventarc trigger exists
