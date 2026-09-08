@@ -52,6 +52,12 @@ def gcs_file_uploaded(cloud_event: Dict[str, Any]):
   bucket = data['bucket']
   filepath = data['name']
 
+  if os.path.basename(filepath) == ConfigService.OUTPUT_ERROR_FILE:
+    # Writing the error file below triggers this function again for that
+    # same upload; skip it here to avoid an infinite self-triggering loop.
+    logging.info('SKIP - Ignoring self-generated error file: %s.', filepath)
+    return
+
   logging.info('BEGIN - Processing uploaded file: %s...', filepath)
 
   try:
@@ -71,7 +77,7 @@ def gcs_file_uploaded(cloud_event: Dict[str, Any]):
     try:
       StorageService.upload_gcs_file(
           file_path=error_file_path,
-          destination_file_name=f'{folder_path}/error.txt',
+          destination_file_name=f'{folder_path}/{ConfigService.OUTPUT_ERROR_FILE}',
           bucket_name=bucket,
           overwrite=True,
       )
